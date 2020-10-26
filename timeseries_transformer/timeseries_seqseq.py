@@ -1,6 +1,9 @@
 # Timeseries transformer encoder / LSTM decoder - TPM 23/10/20
 #%% Import modules
 #data
+import os
+
+os.chdir(r'/Users/tom/Documents/GitHub/timeseries/data')
 from load_co2 import load
 
 #model
@@ -18,15 +21,15 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 %matplotlib inline
 
 # %% Load the data
-seq_len=80 #the length of sequence subset to take
-batch_size = 164
+seq_len=30 #the length of sequence subset to take
+batch_size = 64
 
 #X is a subset of the sequence; Y is the next value in the sequence; D is whether the sequence goes up or down
 train_data, validation_data = load(r"/Users/tom/Documents/GitHub/timeseries/data/data/AMZN.csv", n_features = 1, n_steps_in=seq_len, n_steps_out=seq_len)
 
 #%% instantiate the transformer classifier model and send it to the correct device
 # model = Transformer_seq2seq(num_layers=3, num_rnn_layers=3, d_model=20, num_heads=2, conv_hidden_dim=64, num_answers=80)
-model = Transformer_LSTMdec(num_layers=3, num_rnn_layers=3, d_model=20, num_heads=2, conv_hidden_dim=64)
+model = Transformer_LSTMdec(num_layers=2, num_rnn_layers=2, d_model=20, num_heads=2, conv_hidden_dim=64)
 model.to(device)
 
 #%% testing

@@ -14,8 +14,8 @@ max_len = 200
 text = data.Field(sequential=True, fix_length=max_len, batch_first=True, lower=True, dtype=torch.long)
 label = data.LabelField(sequential=False, dtype=torch.long)
 
-datasets.IMDB.download('data/') #download to the data/ directory if haven't already
-ds_train, ds_test = datasets.IMDB.splits(text, label, path='data/imdb/aclImdb/') #define location of data directory
+datasets.IMDB.download(r'/Users/tom/Documents/GitHub/timeseries/data/') #download to the data/ directory if haven't already
+ds_train, ds_test = datasets.IMDB.splits(text, label, path=r'/Users/tom/Documents/GitHub/timeseries/data/imdb/aclImdb/') #define location of data directory
 print('train : ', len(ds_train))
 print('test : ', len(ds_test))
 print('train.fields :', ds_train.fields)
