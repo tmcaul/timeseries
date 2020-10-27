@@ -10,7 +10,7 @@ nn_Softargmax = nn.Softmax  # fix wrong name
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model, num_heads, p, d_input=None):
+    def __init__(self, d_model, num_heads, p,  d_input=None):
         super().__init__()
         self.num_heads = num_heads
         self.d_model = d_model
@@ -19,6 +19,9 @@ class MultiHeadAttention(nn.Module):
         else:
             d_xq, d_xk, d_xv = d_input
         # Make sure that the embedding dimension of model is a multiple of number of heads
+        # print(d_model)
+        # print(num_heads)
+        # print(d_model%self.num_heads)
         assert d_model % self.num_heads == 0
         self.d_k = d_model // self.num_heads
         # These are still of dimension d_model. They will be split into number of heads 
@@ -28,12 +31,17 @@ class MultiHeadAttention(nn.Module):
         # Outputs of all sub-layers need to be of dimension d_model
         self.W_h = nn.Linear(d_model, d_model)
         
-    def scaled_dot_product_attention(self, Q, K, V):
+    def scaled_dot_product_attention(self, Q, K, V, mask):
         batch_size = Q.size(0) 
         k_length = K.size(-2) 
         # Scaling by d_k so that the soft(arg)max doesnt saturate
         Q = Q / np.sqrt(self.d_k)                         # (bs, n_heads, q_length, dim_per_head)
         scores = torch.matmul(Q, K.transpose(2,3))          # (bs, n_heads, q_length, k_length)
+        
+        #mask the scores if requested
+        if mask is not None:
+            scores += (mask * -1e9)
+        
         A = nn_Softargmax(dim=-1)(scores)   # (bs, n_heads, q_length, k_length)
         # Get the weighted average of the values
         H = torch.matmul(A, V)     # (bs, n_heads, q_length, dim_per_head)
@@ -52,14 +60,14 @@ class MultiHeadAttention(nn.Module):
         """
         return x.transpose(1, 2).contiguous().view(batch_size, -1, self.num_heads * self.d_k)
     
-    def forward(self, X_q, X_k, X_v):
+    def forward(self, X_q, X_k, X_v, mask):
         batch_size, seq_length, dim = X_q.size()
         # After transforming, split into num_heads 
         Q = self.split_heads(self.W_q(X_q), batch_size)  # (bs, n_heads, q_length, dim_per_head)
         K = self.split_heads(self.W_k(X_k), batch_size)  # (bs, n_heads, k_length, dim_per_head)
         V = self.split_heads(self.W_v(X_v), batch_size)  # (bs, n_heads, v_length, dim_per_head)
         # Calculate the attention weights for each of the heads
-        H_cat, A = self.scaled_dot_product_attention(Q, K, V)
+        H_cat, A = self.scaled_dot_product_attention(Q, K, V, mask)
         # Put all the heads back together by concat
         H_cat = self.group_heads(H_cat, batch_size)    # (bs, q_length, dim)
         # Final linear layer  
@@ -91,8 +99,8 @@ class EncoderLayer(nn.Module):
         self.layernorm1 = nn.LayerNorm(normalized_shape=d_model, eps=1e-6)
         self.layernorm2 = nn.LayerNorm(normalized_shape=d_model, eps=1e-6)
 
-    def forward(self, x):
-        attn_output, attn = self.mha(x, x, x)
+    def forward(self, x, mask=None):
+        attn_output, attn = self.mha(x, x, x, mask)
         
         out1 = self.layernorm1(x + attn_output)
         cnn_output = self.cnn(out1)
@@ -153,12 +161,12 @@ class Encoder(nn.Module):
         for _ in range(num_layers):
             self.enc_layers.append(EncoderLayer(d_model, num_heads, ff_hidden_dim, p))
         
-    def forward(self, x):
+    def forward(self, x, mask=None):
         x = torch.unsqueeze(x,-1).repeat(1,1,self.d_model) + self.embedding(x) #Add the val to every row of the positional embedding ; # Transform to (batch_size, input_seq_length, d_model)
 
         for i in range(self.num_layers):
             #feed the input through the network
-            x, a = self.enc_layers[i](x)
+            x, a = self.enc_layers[i](x, mask)
             
             #keep track of the attention layers
             if i==0:
@@ -274,9 +282,11 @@ class Transformer_seq2seq(nn.Module):
 
 
 class Transformer_LSTMdec(nn.Module):
-    def __init__(self, num_layers, num_rnn_layers, d_model, num_heads, conv_hidden_dim):
+    def __init__(self, num_layers, num_rnn_layers, d_model, num_heads, conv_hidden_dim, num_answers):
         super().__init__()
         
+        self.num_answers=num_answers
+
         #define the multiheaded attention encoder
         self.encoder = Encoder(num_layers, d_model, num_heads, conv_hidden_dim, maximum_position_encoding=10000)
         #and a LSTM RNN on top
@@ -285,15 +295,15 @@ class Transformer_LSTMdec(nn.Module):
         self.decoder = torch.nn.Linear(d_model,1, bias=True)
         # self.decoder = LinearDecoder(num_layers, d_model, num_answers)
 
-    def forward(self, x, n):
+    def forward(self, x):
         #encode the input
         x, attention = self.encoder(x)
 
         #preallocate the output
-        y=torch.zeros(x.shape[0],n)
+        y=torch.zeros(x.shape[0],self.num_answers)
 
         #run the RNN for the number of requested times
-        for i in range(0,n):
+        for i in range(0,self.num_answers):
             x, _ = self.LSTM(x)        
             #layernorm
             # x = self.layernorm(x)
@@ -306,3 +316,141 @@ class Transformer_LSTMdec(nn.Module):
             y[:,i]=out
 
         return y, attention
+
+
+class DecoderLayer(nn.Module):
+    def __init__(self, d_model, num_heads, conv_hidden_dim, p=0.1):
+        super().__init__()
+        self.mha1 = MultiHeadAttention(d_model,num_heads,p)
+        self.mha2 = MultiHeadAttention(d_model, num_heads, p)
+        #this is a convolution because every x_i member of the input set passes its hidden representation h_i into the CNN separately
+        self.cnn = CNN(d_model, conv_hidden_dim, p)
+        self.layernorm1 = nn.LayerNorm(normalized_shape=d_model, eps=1e-6)
+        self.layernorm2 = nn.LayerNorm(normalized_shape=d_model, eps=1e-6)
+        self.layernorm3 = nn.LayerNorm(normalized_shape=d_model, eps=1e-6)
+
+    def forward(self, x, enc_output, look_ahead_mask=None, padding_mask=None):
+        #input
+        attn_output, attn = self.mha1(x, x, x, mask=look_ahead_mask)
+        out1 = self.layernorm1(x + attn_output)
+
+        #mha with encoder outputs
+        attn_output2, attn2 = self.mha2(enc_output, enc_output, out1, mask=padding_mask)
+        out2 = self.layernorm2(attn_output2 + out1)
+        
+        #ffn
+        cnn_output = self.cnn(out2)
+        out3 = self.layernorm2(cnn_output + out2)
+
+        return out3, attn, attn2
+
+
+class Decoder(nn.Module):
+    def __init__(self, num_layers, d_model, num_heads, ff_hidden_dim, maximum_position_encoding, p=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.num_layers = num_layers
+        self.embedding = Embeddings(d_model, maximum_position_encoding, p)
+        self.dec_layers = nn.ModuleList()
+
+        for _ in range(num_layers):
+            self.dec_layers.append(DecoderLayer(d_model, num_heads, ff_hidden_dim, p=p))
+        
+    def forward(self, x, enc_output, mask=None):
+        
+        x = torch.unsqueeze(x,-1).repeat(1,1,self.d_model) + self.embedding(x) #Add the val to every row of the positional embedding ; # Transform to (batch_size, input_seq_length, d_model)
+
+        for i in range(self.num_layers):
+            #feed the input through the network
+            x, a1, a2 = self.dec_layers[i](x, enc_output, look_ahead_mask=mask)
+            
+            #keep track of the attention layers
+            if i==0:
+                attention1=a1
+                attention1=torch.unsqueeze(attention1,-1)
+                attention2=a2
+                attention2=torch.unsqueeze(attention2,-1)
+            else:
+                attention1=torch.cat((attention1,torch.unsqueeze(a1,-1)),-1)
+                attention2=torch.cat((attention2,torch.unsqueeze(a2,-1)),-1)
+
+        return x, attention1, attention2  # (batch_size, input_seq_len, d_model)
+
+
+class Transformer(nn.Module):
+    def __init__(self, num_layers, d_model, num_heads, conv_hidden_dim, num_answers):
+        super().__init__()
+        
+        #define the multiheaded attention encoder
+        self.encoder = Encoder(num_layers, d_model, num_heads, conv_hidden_dim, maximum_position_encoding=10000)
+        #and a LSTM RNN on top
+        # self.LSTM = torch.nn.LSTM(d_model, hidden_size=d_model, num_layers=num_rnn_layers, bidirectional=False, bias=False)
+        self.layernorm=torch.nn.LayerNorm(d_model, eps=1e-12)
+        # self.decoder = torch.nn.Linear(d_model,num_answers, bias=True)
+        self.decoder = Decoder(num_layers, d_model, num_heads, conv_hidden_dim, maximum_position_encoding=10000)
+        
+        self.ffn=nn.Linear(d_model,d_model, bias=True)
+        self.ffn2=nn.Linear(d_model,num_answers, bias=True)
+
+    def forward(self, x):
+        #encode the input
+        enc_output, input_attention = self.encoder(x)
+
+        #decode the encoder output + inputs
+        dec_output, output_a1, output_a2 = self.decoder(x, enc_output)
+        output_attention=(output_a1, output_a2)
+
+        #ffn
+        out=self.ffn(dec_output)
+        out,_ = torch.max(out, dim=1)
+        out=self.ffn2(out)
+
+        attn=(input_attention, output_attention)
+
+        return out, attn
+
+
+def create_look_ahead_mask(size):
+    mask = 1 - torch.triu(torch.ones((size, size)))
+    mask=mask.T
+    return mask  # (seq_len, seq_len)
+
+
+# class Transformer_generative(nn.Module):
+#     def __init__(self, num_layers, d_model, num_heads, conv_hidden_dim, num_answers):
+#         super().__init__()
+
+#         # self.num_answers=num_answers
+        
+#         #define the multiheaded attention encoder
+#         self.encoder = Encoder(num_layers, d_model, num_heads, conv_hidden_dim, maximum_position_encoding=10000)
+#         #and a LSTM RNN on top
+#         # self.LSTM = torch.nn.LSTM(d_model, hidden_size=d_model, num_layers=num_rnn_layers, bidirectional=False, bias=False)
+#         self.layernorm=torch.nn.LayerNorm(d_model, eps=1e-12)
+#         # self.decoder = torch.nn.Linear(d_model,num_answers, bias=True)
+#         self.decoder = Decoder(num_layers, d_model, num_heads, conv_hidden_dim, maximum_position_encoding=10000)
+        
+#         self.ffn=nn.Linear(d_model,d_model, bias=True)
+#         self.ffn2=nn.Linear(d_model,1, bias=True)
+
+#     def forward(self, x, y=None):
+#         #encode the input
+#         enc_output, input_attention = self.encoder(x)
+
+#         if self.training==True:
+#             #decode the encoder output + inputs
+#             input_shape=x.shape[-1]
+#             dec_output, output_a1, output_a2 = self.decoder(y, enc_output, mask=create_look_ahead_mask(input_shape))
+#             # output_attention=(output_a1, output_a2)
+
+#         else:
+#             dec_output, output_a1, output_a2=self.decoder(None, enc_output, mask=None, just_encoder=True)
+
+#         #ffn
+#         out=self.ffn(dec_output)
+#         out,_ = torch.max(out, dim=1)
+#         out=self.ffn2(out)
+
+#         attn=(input_attention, output_attention)
+
+#         return out, attn

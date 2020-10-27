@@ -9,7 +9,7 @@ from load_co2 import load
 #model
 import torch
 import torch.nn.functional as f
-from transformer import Transformer_seq2seq, Transformer_LSTMdec
+from transformer import Transformer_seq2seq, Transformer_LSTMdec, Transformer
 
 #for plotting
 import matplotlib.pyplot as plt
@@ -21,15 +21,25 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 %matplotlib inline
 
 # %% Load the data
-seq_len=30 #the length of sequence subset to take
-batch_size = 64
+seq_len=60 #the length of sequence subset to take
+output_seq_len=60
+batch_size = 100
 
 #X is a subset of the sequence; Y is the next value in the sequence; D is whether the sequence goes up or down
 train_data, validation_data = load(r"/Users/tom/Documents/GitHub/timeseries/data/data/AMZN.csv", n_features = 1, n_steps_in=seq_len, n_steps_out=seq_len)
 
+#shuffle these data
+ind=torch.randperm(train_data[0].shape[0])
+train_data[0][:,:]=train_data[0][ind,:]
+train_data[1][:,:]=train_data[1][ind,:]
+
 #%% instantiate the transformer classifier model and send it to the correct device
 # model = Transformer_seq2seq(num_layers=3, num_rnn_layers=3, d_model=20, num_heads=2, conv_hidden_dim=64, num_answers=80)
-model = Transformer_LSTMdec(num_layers=2, num_rnn_layers=2, d_model=20, num_heads=2, conv_hidden_dim=64)
+# model = Transformer_LSTMdec(num_layers=2, num_rnn_layers=2, d_model=20, num_heads=2, conv_hidden_dim=64, num_answers=output_seq_len)
+
+#TO DO - implement masking
+model = Transformer(num_layers=2, d_model=40, num_heads=2, conv_hidden_dim=64, num_answers=output_seq_len)
+
 model.to(device)
 
 #%% testing
@@ -38,14 +48,20 @@ y = torch.tensor(train_data[1][0:124], requires_grad=False, dtype=torch.float).f
 
 # x_embed=model.encoder.embedding(x)
 # out, attn = model.encoder.enc_layers[0](x_embed)
-out, attn = model(x, seq_len)
-plot_profiles(x,y,out,0)
+out, attn = model(x)
+plot_profiles(x,y,out,123)
 
 #attn dimensions: [batch_size, head, input, input, layer]
 #plt.imshow(attn[0,1,:,:,0].detach().numpy()) #this shows how every data point in a sample attends to every other data point in a sample
 #plt.plot(attn[0,0,0,:,0].detach().numpy())
 
 #%% Set up training and evaluation loops
+
+#set up importance factor for loss
+loss_importance_factor=torch.tensor([output_seq_len-n for n in range(0,output_seq_len)],requires_grad=False, dtype=torch.float)
+# loss_importance_factor=torch.exp(loss_importance_factor)**0.5
+loss_importance_factor=loss_importance_factor/sum(loss_importance_factor)
+
 def train(train_data, validation_data, epochs, plot=True):
     
     if plot==True:
@@ -64,10 +80,10 @@ def train(train_data, validation_data, epochs, plot=True):
             if i2>len(train_data[0]): i2=-1
 
             x = torch.tensor(train_data[0][i1:i2], requires_grad=False, dtype=torch.double).float()
-            y = torch.tensor(train_data[1][i1:i2], requires_grad=False, dtype=torch.double).float()
+            y = torch.tensor(train_data[1][i1:i2,0:output_seq_len], requires_grad=False, dtype=torch.double).float()
             
-            out, attn = model(x,seq_len)  # ①
-            loss = f.mse_loss(out, y)  # ②
+            out, attn = model(x)  # ①
+            loss = f.mse_loss(out*loss_importance_factor, y*loss_importance_factor, reduce=True, reduction='sum')  # ②
             model.zero_grad()  # ③
             loss.backward()  # ④
             losses += loss.item()
@@ -99,6 +115,7 @@ def train(train_data, validation_data, epochs, plot=True):
 def evaluate(validation_data):
     nb_batches = len(validation_data[0])//batch_size
     model.eval()
+    torch.no_grad()
     losses=0.0
 
     for b in range(0,nb_batches):
@@ -108,14 +125,14 @@ def evaluate(validation_data):
         if i2>len(validation_data[0]): i2=-1
 
         x = torch.tensor(validation_data[0][i1:i2], requires_grad=False, dtype=torch.double).float()
-        y = torch.tensor(validation_data[1][i1:i2], requires_grad=False, dtype=torch.double).float()
+        y = torch.tensor(validation_data[1][i1:i2,0:output_seq_len], requires_grad=False, dtype=torch.double).float()
                 
-        out, attn = model(x,seq_len)
+        out, attn = model(x)
         # d_pred=torch.tensor(out.squeeze()>x[:,-1].squeeze(), requires_grad=False, dtype=torch.int32)
         # d_true=torch.tensor(y.squeeze()>x[:,-1].squeeze(), requires_grad=False, dtype=torch.int32)
         # err += sum((d_pred-d_true)**2)
 
-        loss=f.mse_loss(out,y)
+        loss=f.mse_loss(out,y, reduce=True, reduction='mean')
         losses+=loss.item()
     
     losses=losses/nb_batches
@@ -124,11 +141,18 @@ def evaluate(validation_data):
 
 #%% Train
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
-epochs = 10
+epochs = 20
 train(train_data, validation_data, epochs, plot=True)
 
 # %% Visualise results
-out, attn = model(x, seq_len)
-plot_profiles(x,y,out,14)
+x = torch.tensor(train_data[0][0:10], requires_grad=False, dtype=torch.float).float()
+out, attn = model(x)
+plot_profiles(x,y,out,4)
+
+# %% Histograms of activations
+# w,_=model.encoder(x)
+
+# w,_=model.encoder(x)
+# plt.hist(w.detach().numpy().flatten())
 
 # %%

@@ -9,12 +9,13 @@ def plot_profiles(x,y,out,batchno):
     Y=out[batchno,:].detach().numpy()
 
     #add the final element of X to Y for plotting purposes
-    Y2=np.insert(Ytrue,0,X[-1])
+    Y2true=np.insert(Ytrue,0,X[-1])
+    Y2model=np.insert(Y,0,X[-1])
 
     fig,ax=plt.subplots()
     inputdata, = ax.plot(range(0,len(X)),X,'r') #input data
-    modeloutput, = ax.plot(range(len(X),len(X)+len(Y)),Y,'b') #model output
-    outputdata, = ax.plot(range(len(X)-1,len(X)+len(Y2)-1),Y2,'g') #real output
+    modeloutput, = ax.plot(range(len(X)-1,len(X)+len(Y2model)-1),Y2model,'b') #model output
+    outputdata, = ax.plot(range(len(X)-1,len(X)+len(Y2true)-1),Y2true,'g') #real output
     ax.legend((inputdata,modeloutput,outputdata),('Input', 'Model', 'True'))
 
 
